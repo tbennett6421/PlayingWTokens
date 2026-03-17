@@ -378,9 +378,11 @@ static BOOL is_process_protected(HANDLE proc, PS_PROTECTION *prot) {
     if (!pNtQueryInformationProcess) return FALSE;
     ULONG len;
     memset(prot, 0, sizeof(*prot));
-    return pNtQueryInformationProcess(proc, ProcessProtectionInformation,
-                                      prot, sizeof(*prot), &len) == 0
-           && prot->Type != 0;
+    if (pNtQueryInformationProcess(proc, ProcessProtectionInformation,
+                                   prot, sizeof(*prot), &len) != 0)
+        return FALSE;
+    /* Type must be 1 (PP) or 2 (PPL) with a valid signer */
+    return (prot->Type == 1 || prot->Type == 2) && prot->Signer != 0;
 }
 
 static const char *protection_type_str(UCHAR type) {
