@@ -3,12 +3,15 @@ CFLAGS = -Wall
 LDFLAGS = -ladvapi32
 
 SRCS = $(wildcard *.c)
-EXES = $(SRCS:.c=.exe)
+EXES = $(addprefix dist/,$(SRCS:.c=.exe))
 
-all: $(EXES)
+all: dist $(EXES)
 
-%.exe: %.c
+dist:
+	mkdir -p dist
+
+dist/%.exe: %.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 clean:
-	rm -f $(EXES)
+	rm -rf dist
