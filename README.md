@@ -80,6 +80,22 @@ impersonate.exe 928 cmd.exe      Launch a SYSTEM cmd prompt
 impersonate.exe 928 calc.exe     Launch calc.exe as SYSTEM
 ```
 
+### whoami_privs
+
+Reimplements `whoami /priv` using the Win32 API directly. Displays the current username, process integrity level, and a formatted table of all token privileges with their enabled/disabled state.
+
+```
+Usage: whoami_privs.exe
+```
+
+### check_high_integrity_primative
+
+Quick check that reports whether the current process is running at high integrity (elevated). Exits 0 on success, 1 on failure — useful as a gate in scripts or toolchains.
+
+```
+Usage: check_high_integrity_primative.exe
+```
+
 ## Requirements
 
 - Windows 10+ (uses `ENABLE_VIRTUAL_TERMINAL_PROCESSING` for color, `NtQuerySystemInformation` for handle enumeration)
