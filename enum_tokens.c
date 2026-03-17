@@ -428,7 +428,14 @@ static int match_filter(PROCESSENTRY32 *pe, const char *filter) {
     char *end;
     DWORD pid = strtoul(filter, &end, 10);
     if (*end == '\0') return pe->th32ProcessID == pid;
-    return _stricmp(pe->szExeFile, filter) == 0;
+    /* Exact match first, then substring (case-insensitive) */
+    if (_stricmp(pe->szExeFile, filter) == 0) return 1;
+    char hay[MAX_PATH], needle[MAX_PATH];
+    for (int i = 0; pe->szExeFile[i]; i++) hay[i] = tolower(pe->szExeFile[i]);
+    hay[strlen(pe->szExeFile)] = '\0';
+    for (int i = 0; filter[i]; i++) needle[i] = tolower(filter[i]);
+    needle[strlen(filter)] = '\0';
+    return strstr(hay, needle) != NULL;
 }
 
 static void print_caller_context(void) {
@@ -453,7 +460,23 @@ int main(int argc, char *argv[]) {
             exclude_protected = TRUE;
         else if (strcmp(argv[i], "-t") == 0)
             table_view = TRUE;
-        else
+        else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printf("enum_tokens - Enumerate process tokens and assess impersonation viability\n\n"
+                   "Usage: enum_tokens.exe [options] [target]\n\n"
+                   "Target:\n"
+                   "  <PID>            Filter by process ID\n"
+                   "  <name.exe>       Filter by process name (case-insensitive)\n\n"
+                   "Options:\n"
+                   "  -t               Table view (compact one-line-per-process summary)\n"
+                   "  -x               Exclude protected and inaccessible processes\n"
+                   "  -h, --help       Show this help\n\n"
+                   "Examples:\n"
+                   "  enum_tokens.exe              Show all process tokens\n"
+                   "  enum_tokens.exe -t -x        Table view, skip protected processes\n"
+                   "  enum_tokens.exe svchost.exe  Show tokens for svchost instances\n"
+                   "  enum_tokens.exe 928          Show token for PID 928\n");
+            return 0;
+        } else
             filter = argv[i];
     }
 

@@ -123,12 +123,23 @@ static BOOL is_token_handle(HANDLE h) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <PID> [command]\n", argv[0]);
-        fprintf(stderr, "  PID only  — impersonate and revert (demo)\n");
-        fprintf(stderr, "  PID + cmd — launch command as stolen identity\n");
-        fprintf(stderr, "  Example:  %s 928 cmd.exe\n", argv[0]);
-        return 1;
+    if (argc < 2 || strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+        printf("impersonate - Steal a token from a target process and impersonate or launch a command\n\n"
+               "Usage: impersonate.exe <PID> [command]\n\n"
+               "Modes:\n"
+               "  impersonate.exe <PID>          Demo mode: impersonate, print identity, revert\n"
+               "  impersonate.exe <PID> <cmd>    Launch <cmd> as the stolen identity\n\n"
+               "Options:\n"
+               "  -h, --help                     Show this help\n\n"
+               "Examples:\n"
+               "  impersonate.exe 928            Impersonate PID 928's token (demo)\n"
+               "  impersonate.exe 928 cmd.exe    Launch cmd.exe as PID 928's identity\n"
+               "  impersonate.exe 928 calc.exe   Launch calc.exe as PID 928's identity\n\n"
+               "Notes:\n"
+               "  Requires SeDebugPrivilege to target processes owned by other users.\n"
+               "  Requires SeImpersonatePrivilege to impersonate tokens at higher integrity.\n"
+               "  Tokens matching the caller's identity are skipped automatically.\n");
+        return (argc < 2) ? 1 : 0;
     }
 
     DWORD pid = strtoul(argv[1], NULL, 10);
