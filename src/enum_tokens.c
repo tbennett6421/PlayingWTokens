@@ -6,7 +6,7 @@
  * impersonation access check:
  *
  *   1. If token imp level < SecurityImpersonation -> ALLOW (identification
- *      only, can't run code — harmless).
+ *      only, can't run code -- harmless).
  *   2. If caller has SeImpersonatePrivilege -> ALLOW.
  *   3. If caller integrity <= token integrity AND caller user == token user
  *      -> ALLOW, else restrict to Identification level.
@@ -50,7 +50,7 @@ static void init_console_color(void) {
 #define C_YELLOW  (g_color ? "\033[1;33m" : "")
 #define C_CYAN    (g_color ? "\033[1;36m" : "")
 
-/* Privileges worth paying attention to — commonly abused for
+/* Privileges worth paying attention to -- commonly abused for
    escalation, impersonation, or credential access. */
 static const char *interesting_privs[] = {
     "SeImpersonatePrivilege",
@@ -184,7 +184,7 @@ static const char *verdict_reason(imp_verdict v, SECURITY_IMPERSONATION_LEVEL il
         break;
     case IMP_USABLE:
         if (il < SecurityImpersonation)
-            _snprintf(buf, sizeof(buf), "identification level — harmless");
+            _snprintf(buf, sizeof(buf), "identification level -- harmless");
         else
             _snprintf(buf, sizeof(buf), "SeImpersonatePrivilege held by caller");
         if (!g_caller.has_impersonate_priv)
@@ -210,7 +210,7 @@ static const char *verdict_reason(imp_verdict v, SECURITY_IMPERSONATION_LEVEL il
 static imp_verdict evaluate_impersonation(HANDLE target_tok) {
     SECURITY_IMPERSONATION_LEVEL il = get_imp_level(target_tok);
 
-    /* Rule 1: below Impersonation level — harmless, can't execute code */
+    /* Rule 1: below Impersonation level -- harmless, can't execute code */
     if (il < SecurityImpersonation)
         return IMP_IDENTIFICATION_ONLY;
 
@@ -563,7 +563,7 @@ int main(int argc, char *argv[]) {
         if (!proc) {
             if (!exclude_protected) {
                 printf("=== PID %-6lu  %s ===\n", pe.th32ProcessID, pe.szExeFile);
-                printf("  %s[ACCESS DENIED — protected/minimal process]%s\n\n",
+                printf("  %s[ACCESS DENIED -- protected/minimal process]%s\n\n",
                        C_RED, C_RESET);
             }
             continue;
@@ -578,11 +578,11 @@ int main(int argc, char *argv[]) {
             if (!exclude_protected) {
                 printf("=== PID %-6lu  %s ===\n", pe.th32ProcessID, pe.szExeFile);
                 if (is_ppl)
-                    printf("  %s[PROTECTED: %s / Signer: %s — token inaccessible]%s\n\n",
+                    printf("  %s[PROTECTED: %s / Signer: %s -- token inaccessible]%s\n\n",
                            C_YELLOW, protection_type_str(prot.Type),
                            protection_signer_str(prot.Signer), C_RESET);
                 else
-                    printf("  %s[OpenProcessToken DENIED — error %lu]%s\n\n",
+                    printf("  %s[OpenProcessToken DENIED -- error %lu]%s\n\n",
                            C_RED, GetLastError(), C_RESET);
             }
             CloseHandle(proc);
