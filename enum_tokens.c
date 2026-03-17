@@ -438,6 +438,51 @@ static int match_filter(PROCESSENTRY32 *pe, const char *filter) {
     return strstr(hay, needle) != NULL;
 }
 
+/* Case-insensitive substring helper */
+static BOOL istrstr(const char *hay, const char *needle) {
+    char h[512], n[512];
+    size_t hlen = strlen(hay), nlen = strlen(needle);
+    if (hlen >= sizeof(h)) hlen = sizeof(h) - 1;
+    if (nlen >= sizeof(n)) nlen = sizeof(n) - 1;
+    for (size_t i = 0; i < hlen; i++) h[i] = tolower(hay[i]);
+    h[hlen] = '\0';
+    for (size_t i = 0; i < nlen; i++) n[i] = tolower(needle[i]);
+    n[nlen] = '\0';
+    return strstr(h, n) != NULL;
+}
+
+/* Match token user/SID against a lazy filter string */
+static BOOL match_user_filter(HANDLE tok, const char *uf) {
+    if (!uf) return TRUE;
+
+    PSID sid = get_token_user_sid(tok);
+    if (!sid) return FALSE;
+
+    BOOL match = FALSE;
+
+    /* Check against SID string */
+    char *sid_str = NULL;
+    if (ConvertSidToStringSidA(sid, &sid_str)) {
+        if (istrstr(sid_str, uf)) match = TRUE;
+        LocalFree(sid_str);
+    }
+
+    /* Check against resolved DOMAIN\user and bare username */
+    if (!match) {
+        char name[256] = {0}, domain[256] = {0}, full[512];
+        DWORD nlen = sizeof(name), dlen = sizeof(domain);
+        SID_NAME_USE use;
+        if (LookupAccountSidA(NULL, sid, name, &nlen, domain, &dlen, &use)) {
+            _snprintf(full, sizeof(full), "%s\\%s", domain, name);
+            if (istrstr(full, uf) || istrstr(name, uf))
+                match = TRUE;
+        }
+    }
+
+    free(sid);
+    return match;
+}
+
 static void print_caller_context(void) {
     char *sid_str = NULL;
     if (g_caller.user_sid && ConvertSidToStringSidA(g_caller.user_sid, &sid_str)) {
@@ -452,6 +497,7 @@ static void print_caller_context(void) {
 
 int main(int argc, char *argv[]) {
     const char *filter = NULL;
+    const char *user_filter = NULL;
     BOOL exclude_protected = FALSE;
     BOOL table_view = FALSE;
 
@@ -460,20 +506,26 @@ int main(int argc, char *argv[]) {
             exclude_protected = TRUE;
         else if (strcmp(argv[i], "-t") == 0)
             table_view = TRUE;
+        else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc)
+            user_filter = argv[++i];
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printf("enum_tokens - Enumerate process tokens and assess impersonation viability\n\n"
                    "Usage: enum_tokens.exe [options] [target]\n\n"
                    "Target:\n"
                    "  <PID>            Filter by process ID\n"
-                   "  <name.exe>       Filter by process name (case-insensitive)\n\n"
+                   "  <name.exe>       Filter by process name (case-insensitive, substring)\n\n"
                    "Options:\n"
                    "  -t               Table view (compact one-line-per-process summary)\n"
                    "  -x               Exclude protected and inaccessible processes\n"
+                   "  -u <user>        Filter by token user, SID, or substring\n"
+                   "                   (e.g. SYSTEM, S-1-5-18, NETWORK)\n"
                    "  -h, --help       Show this help\n\n"
                    "Examples:\n"
                    "  enum_tokens.exe              Show all process tokens\n"
                    "  enum_tokens.exe -t -x        Table view, skip protected processes\n"
                    "  enum_tokens.exe svchost.exe  Show tokens for svchost instances\n"
+                   "  enum_tokens.exe -u SYSTEM    Show all processes running as SYSTEM\n"
+                   "  enum_tokens.exe -u S-1-5-18  Filter by SID\n"
                    "  enum_tokens.exe 928          Show token for PID 928\n");
             return 0;
         } else
@@ -538,6 +590,12 @@ int main(int argc, char *argv[]) {
         }
 
         if (exclude_protected && is_ppl) {
+            CloseHandle(tok);
+            CloseHandle(proc);
+            continue;
+        }
+
+        if (!match_user_filter(tok, user_filter)) {
             CloseHandle(tok);
             CloseHandle(proc);
             continue;
