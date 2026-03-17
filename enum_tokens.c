@@ -444,7 +444,15 @@ static void print_caller_context(void) {
 }
 
 int main(int argc, char *argv[]) {
-    const char *filter = (argc > 1) ? argv[1] : NULL;
+    const char *filter = NULL;
+    BOOL exclude_protected = FALSE;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-x") == 0)
+            exclude_protected = TRUE;
+        else
+            filter = argv[i];
+    }
 
     enable_debug_priv();
     init_console_color();
@@ -471,9 +479,11 @@ int main(int argc, char *argv[]) {
             proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
 
         if (!proc) {
-            printf("=== PID %-6lu  %s ===\n", pe.th32ProcessID, pe.szExeFile);
-            printf("  %s[ACCESS DENIED — protected/minimal process]%s\n\n",
-                   C_RED, C_RESET);
+            if (!exclude_protected) {
+                printf("=== PID %-6lu  %s ===\n", pe.th32ProcessID, pe.szExeFile);
+                printf("  %s[ACCESS DENIED — protected/minimal process]%s\n\n",
+                       C_RED, C_RESET);
+            }
             continue;
         }
 
@@ -483,14 +493,22 @@ int main(int argc, char *argv[]) {
 
         HANDLE tok;
         if (!OpenProcessToken(proc, TOKEN_QUERY, &tok)) {
-            printf("=== PID %-6lu  %s ===\n", pe.th32ProcessID, pe.szExeFile);
-            if (is_ppl)
-                printf("  %s[PROTECTED: %s / Signer: %s — token inaccessible]%s\n\n",
-                       C_YELLOW, protection_type_str(prot.Type),
-                       protection_signer_str(prot.Signer), C_RESET);
-            else
-                printf("  %s[OpenProcessToken DENIED — error %lu]%s\n\n",
-                       C_RED, GetLastError(), C_RESET);
+            if (!exclude_protected) {
+                printf("=== PID %-6lu  %s ===\n", pe.th32ProcessID, pe.szExeFile);
+                if (is_ppl)
+                    printf("  %s[PROTECTED: %s / Signer: %s — token inaccessible]%s\n\n",
+                           C_YELLOW, protection_type_str(prot.Type),
+                           protection_signer_str(prot.Signer), C_RESET);
+                else
+                    printf("  %s[OpenProcessToken DENIED — error %lu]%s\n\n",
+                           C_RED, GetLastError(), C_RESET);
+            }
+            CloseHandle(proc);
+            continue;
+        }
+
+        if (exclude_protected && is_ppl) {
+            CloseHandle(tok);
             CloseHandle(proc);
             continue;
         }
