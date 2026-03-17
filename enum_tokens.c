@@ -446,10 +446,13 @@ static void print_caller_context(void) {
 int main(int argc, char *argv[]) {
     const char *filter = NULL;
     BOOL exclude_protected = FALSE;
+    BOOL table_view = FALSE;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-x") == 0)
             exclude_protected = TRUE;
+        else if (strcmp(argv[i], "-t") == 0)
+            table_view = TRUE;
         else
             filter = argv[i];
     }
@@ -458,7 +461,11 @@ int main(int argc, char *argv[]) {
     init_console_color();
     init_ntdll();
     init_caller_ctx();
-    print_caller_context();
+    if (!table_view)
+        print_caller_context();
+    else
+        printf("%-8s %-22s %-28s %-26s %-10s %s\n",
+               "PID", "PROCESS", "USER", "SID", "INTEGRITY", "VERDICT");
 
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) {
@@ -513,16 +520,51 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        printf("=== PID %-6lu  %s ===\n", pe.th32ProcessID, pe.szExeFile);
-        if (is_ppl)
-            printf("  %s[PROTECTED: %s / Signer: %s]%s\n",
-                   C_YELLOW, protection_type_str(prot.Type),
-                   protection_signer_str(prot.Signer), C_RESET);
-        print_token_info(tok);
-        print_impersonation_verdict(tok);
-        printf("  Privileges:\n");
-        print_privileges(tok);
-        printf("\n");
+        if (table_view) {
+            char user[64] = "?", sid_buf[80] = "?";
+            PSID sid = get_token_user_sid(tok);
+            if (sid) {
+                char name[256] = {0}, domain[256] = {0};
+                DWORD nlen = sizeof(name), dlen = sizeof(domain);
+                SID_NAME_USE use;
+                if (LookupAccountSidA(NULL, sid, name, &nlen, domain, &dlen, &use)) {
+                    if (domain[0])
+                        _snprintf(user, sizeof(user), "%s\\%s", domain, name);
+                    else
+                        _snprintf(user, sizeof(user), "%s", name);
+                }
+                char *ss = NULL;
+                if (ConvertSidToStringSidA(sid, &ss)) {
+                    _snprintf(sid_buf, sizeof(sid_buf), "%s", ss);
+                    LocalFree(ss);
+                }
+                free(sid);
+            }
+            DWORD rid = get_integrity_rid(tok);
+            imp_verdict v = evaluate_impersonation(tok);
+            const char *vc, *vs;
+            switch (v) {
+            case IMP_USABLE:              vc = C_GREEN;  vs = "USABLE";   break;
+            case IMP_IDENTIFICATION_ONLY: vc = C_YELLOW; vs = "IDENT";    break;
+            case IMP_RESTRICTED:          vc = C_RED;    vs = "RESTRICT"; break;
+            default:                      vc = C_RESET;  vs = "?";        break;
+            }
+            printf("%-8lu %-22s %-28s %-26s %-10s %s%s%s%s\n",
+                   pe.th32ProcessID, pe.szExeFile, user, sid_buf,
+                   integrity_str(rid), vc, vs,
+                   is_ppl ? " [PPL]" : "", C_RESET);
+        } else {
+            printf("=== PID %-6lu  %s ===\n", pe.th32ProcessID, pe.szExeFile);
+            if (is_ppl)
+                printf("  %s[PROTECTED: %s / Signer: %s]%s\n",
+                       C_YELLOW, protection_type_str(prot.Type),
+                       protection_signer_str(prot.Signer), C_RESET);
+            print_token_info(tok);
+            print_impersonation_verdict(tok);
+            printf("  Privileges:\n");
+            print_privileges(tok);
+            printf("\n");
+        }
         CloseHandle(tok);
         CloseHandle(proc);
     } while (Process32Next(snap, &pe));
