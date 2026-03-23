@@ -13,6 +13,22 @@ make
 
 Binaries are output to `dist/`.
 
+### BOFs (Beacon Object Files)
+
+BOF versions of the tools live in `src/bof/`. Build with:
+
+```
+make bof
+```
+
+Output: `dist/bof/*.x64.o` and `dist/bof/*.x86.o`. These are raw COFF object files loadable by Cobalt Strike, COFFLoader, Sliver, or any compatible BOF loader.
+
+| BOF | Arguments | Description |
+|-----|-----------|-------------|
+| `enum_tokens_bof` | `int pid` (0=all) | Enumerate tokens and assess impersonation viability |
+| `impersonate_bof` | `int pid`, `z cmd` | Steal token from specific PID, spawn command |
+| `bulk_impersonate_bof` | `z user_filter`, `z cmd` | Target user identity across all processes, spawn command |
+
 ## Tools
 
 ### enum_tokens
@@ -78,6 +94,31 @@ Options:
 impersonate.exe 928              Demo impersonation of PID 928
 impersonate.exe 928 cmd.exe      Launch a SYSTEM cmd prompt
 impersonate.exe 928 calc.exe     Launch calc.exe as SYSTEM
+```
+
+### bulk_impersonate
+
+Targets a specific user identity (by SID, username, or substring) and iterates through all processes running as that user until a token can be stolen and used to launch a command.
+
+Uses a two-strategy approach per process:
+1. `OpenProcessToken` with `TOKEN_DUPLICATE` (fast, works when the token DACL allows it)
+2. Fallback: `OpenProcess(PROCESS_DUP_HANDLE)` + system handle table scan via `NtQuerySystemInformation` (the SeDebugPrivilege path)
+
+Stops on the first successful spawn.
+
+```
+Usage: bulk_impersonate.exe <user_filter> <command>
+```
+
+The user filter matches case-insensitively against SID string, `DOMAIN\user`, or bare username.
+
+**Examples:**
+
+```
+bulk_impersonate.exe SYSTEM cmd.exe
+bulk_impersonate.exe S-1-5-18 whoami.exe
+bulk_impersonate.exe "NETWORK SERVICE" cmd.exe
+bulk_impersonate.exe Administrator powershell.exe
 ```
 
 ### whoami_privs
