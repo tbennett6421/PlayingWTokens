@@ -11,11 +11,11 @@ brew install mingw-w64
 make
 ```
 
-Binaries are output to `dist/`.
+This builds all standalone executables to `dist/` and all BOFs to `dist/bof/`.
 
 ### BOFs (Beacon Object Files)
 
-BOF versions of the tools live in `src/bof/`. Build with:
+BOF versions of the tools live in `src/bof/`. To build BOFs only:
 
 ```
 make bof
@@ -28,6 +28,8 @@ Output: `dist/bof/*.x64.o` and `dist/bof/*.x86.o`. These are raw COFF object fil
 | `enum_tokens_bof` | `int pid` (0=all) | Enumerate tokens and assess impersonation viability |
 | `impersonate_bof` | `int pid`, `z cmd` | Steal token from specific PID, spawn command |
 | `bulk_impersonate_bof` | `z user_filter`, `z cmd` | Target user identity across all processes, spawn command |
+
+All BOFs use the same two-strategy token acquisition as their standalone counterparts (direct `OpenProcessToken` first, handle table scan fallback).
 
 ## Tools
 
@@ -46,11 +48,13 @@ Usage: enum_tokens.exe [options] [target]
 
 Target:
   <PID>            Filter by process ID
-  <name.exe>       Filter by process name (case-insensitive)
+  <name.exe>       Filter by process name (case-insensitive, substring)
 
 Options:
   -t               Table view (compact one-line-per-process summary)
   -x               Exclude protected and inaccessible processes
+  -u <user>        Filter by token user, SID, or substring
+                   (e.g. SYSTEM, S-1-5-18, NETWORK)
   -h, --help       Show this help
 ```
 
@@ -62,6 +66,8 @@ enum_tokens.exe -t             Table view for quick scanning
 enum_tokens.exe -t -x          Table view, skip protected processes
 enum_tokens.exe svchost.exe    Show tokens for all svchost instances
 enum_tokens.exe 928            Show token for a specific PID
+enum_tokens.exe -u SYSTEM      Show all processes running as SYSTEM
+enum_tokens.exe -u S-1-5-18    Filter by SID
 ```
 
 **Color coding:**
@@ -71,9 +77,10 @@ enum_tokens.exe 928            Show token for a specific PID
 
 ### impersonate
 
-Demonstrates the full token impersonation chain by targeting a specific PID. Bypasses the token object DACL by using `DuplicateHandle` via the target's handle table rather than `OpenProcessToken`.
+Demonstrates the full token impersonation chain by targeting a specific PID. Uses two strategies to acquire the token:
 
-The chain: `OpenProcess` → `NtQuerySystemInformation` (enumerate handles) → `DuplicateHandle` → `DuplicateTokenEx` → `ImpersonateLoggedOnUser` or `CreateProcessWithTokenW`.
+1. `OpenProcessToken` with `TOKEN_DUPLICATE` (direct, fast)
+2. Fallback: `DuplicateHandle` via the target's handle table using `NtQuerySystemInformation` — bypasses the token object DACL
 
 Tokens matching the caller's own identity are automatically skipped.
 
@@ -92,9 +99,14 @@ Options:
 
 ```
 impersonate.exe 928              Demo impersonation of PID 928
-impersonate.exe 928 cmd.exe      Launch a SYSTEM cmd prompt
-impersonate.exe 928 calc.exe     Launch calc.exe as SYSTEM
+impersonate.exe 928 cmd.exe      Launch cmd.exe as PID 928's identity
+impersonate.exe 928 calc.exe     Launch calc.exe as PID 928's identity
 ```
+
+**Notes:**
+- Requires `SeDebugPrivilege` to target processes owned by other users.
+- Requires `SeImpersonatePrivilege` to impersonate tokens at higher integrity.
+- Tokens matching the caller's identity are skipped automatically.
 
 ### bulk_impersonate
 
@@ -108,6 +120,9 @@ Stops on the first successful spawn.
 
 ```
 Usage: bulk_impersonate.exe <user_filter> <command>
+
+Options:
+  -h, --help       Show this help
 ```
 
 The user filter matches case-insensitively against SID string, `DOMAIN\user`, or bare username.
@@ -129,19 +144,19 @@ Reimplements `whoami /priv` using the Win32 API directly. Displays the current u
 Usage: whoami_privs.exe
 ```
 
-### check_high_integrity_primative
+### check_high_integrity_primitive
 
 Quick check that reports whether the current process is running at high integrity (elevated). Exits 0 on success, 1 on failure — useful as a gate in scripts or toolchains.
 
 ```
-Usage: check_high_integrity_primative.exe
+Usage: check_high_integrity_primitive.exe
 ```
 
 ## Requirements
 
 - Windows 10+ (uses `ENABLE_VIRTUAL_TERMINAL_PROCESSING` for color, `NtQuerySystemInformation` for handle enumeration)
 - `enum_tokens`: Run as Administrator for full visibility. Standard users see only their own processes.
-- `impersonate`: Requires `SeDebugPrivilege` (to open other users' processes) and `SeImpersonatePrivilege` (to use the stolen token). Both are present in an elevated admin token.
+- `impersonate`, `bulk_impersonate`: Require `SeDebugPrivilege` (to open other users' processes) and `SeImpersonatePrivilege` (to use the stolen token). Both are present in an elevated admin token.
 
 ## Key Concepts
 
@@ -149,3 +164,19 @@ Usage: check_high_integrity_primative.exe
 - **OpenProcessToken** performs its own access check against the token's DACL — SeDebugPrivilege doesn't help.
 - The workaround is `DuplicateHandle` with `PROCESS_DUP_HANDLE` — copying an existing handle from the target's handle table bypasses the token DACL entirely.
 - Protected Process Light (PPL) processes cannot be opened even with SeDebugPrivilege. The kernel enforces this at a level below the normal access check.
+
+## Notable Targets
+
+### winlogon.exe
+
+`winlogon.exe` is consistently the most reliable target for SYSTEM token theft:
+
+- **Always running** — one instance per session, always present.
+- **Runs as SYSTEM** — `NT AUTHORITY\SYSTEM` with full privileges.
+- **Not PPL** — unlike `lsass.exe` (PPL on modern Windows), `winlogon.exe` is not a protected process. Its process DACL can be bypassed with SeDebugPrivilege.
+- **Has open token handles** — winlogon keeps token handles open in its handle table for managing logon sessions, so both the direct `OpenProcessToken` method and the handle table scan succeed on it.
+- **Stable** — it doesn't churn handles or exit, so the token is reliably available.
+
+In practice, `bulk_impersonate.exe SYSTEM cmd.exe` will almost always land on winlogon first. Many real-world tools skip the process scan entirely and target winlogon directly.
+
+**OPSEC note:** some EDR products specifically monitor for token access against `winlogon.exe` as an indicator of compromise. The bulk approach provides fallback to other SYSTEM processes (e.g. `svchost.exe`, `services.exe`) if winlogon is being watched or hardened.
