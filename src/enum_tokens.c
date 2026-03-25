@@ -185,9 +185,9 @@ static const char *verdict_reason(imp_verdict v, SECURITY_IMPERSONATION_LEVEL il
     case IMP_USABLE:
         if (il < SecurityImpersonation)
             _snprintf(buf, sizeof(buf), "identification level -- harmless");
-        else
+        else if (g_caller.has_impersonate_priv)
             _snprintf(buf, sizeof(buf), "SeImpersonatePrivilege held by caller");
-        if (!g_caller.has_impersonate_priv)
+        else
             _snprintf(buf, sizeof(buf), "same user + caller integrity 0x%04lx <= target 0x%04lx",
                       caller_il, target_il);
         break;
