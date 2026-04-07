@@ -1,7 +1,7 @@
 CC = x86_64-w64-mingw32-gcc
 CC32 = i686-w64-mingw32-gcc
 CFLAGS = -Wall
-LDFLAGS = -ladvapi32
+LDFLAGS = -ladvapi32 -lsecur32
 
 SRCS = $(wildcard src/*.c)
 EXES = $(patsubst src/%.c,dist/%.exe,$(SRCS))

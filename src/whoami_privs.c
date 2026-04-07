@@ -1,5 +1,22 @@
 #include <windows.h>
+#include <ntsecapi.h>
 #include <stdio.h>
+
+
+static const char *logon_type_str(ULONG type) {
+    switch (type) {
+        case 2:  return "Interactive";
+        case 3:  return "Network";
+        case 4:  return "Batch";
+        case 5:  return "Service";
+        case 7:  return "Unlock";
+        case 8:  return "NetworkCleartext";
+        case 9:  return "NewCredentials";
+        case 10: return "RemoteInteractive";
+        case 11: return "CachedInteractive";
+        default: return "Unknown";
+    }
+}
 
 int main() {
     HANDLE hToken;
@@ -16,12 +33,26 @@ int main() {
         printf("Current User: %s\n", username);
     }
 
-    // Get integrity level
+    // Get integrity level and logon type from the same token handle
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
         printf("Failed to open process token\n");
         return 1;
     }
 
+    // Logon session type
+    TOKEN_STATISTICS stats;
+    DWORD statsLen = 0;
+    if (GetTokenInformation(hToken, TokenStatistics, &stats, sizeof(stats), &statsLen)) {
+        PSECURITY_LOGON_SESSION_DATA pSession = NULL;
+        if (LsaGetLogonSessionData(&stats.AuthenticationId, &pSession) == 0) {
+            printf("Logon Type:      %lu (%s)\n", pSession->LogonType, logon_type_str(pSession->LogonType));
+            printf("Logon Server:    %.*S\n", pSession->LogonServer.Length / 2, pSession->LogonServer.Buffer);
+            printf("Auth Package:    %.*S\n", pSession->AuthenticationPackage.Length / 2, pSession->AuthenticationPackage.Buffer);
+            LsaFreeReturnBuffer(pSession);
+        }
+    }
+
+    // Integrity level
     GetTokenInformation(hToken, TokenIntegrityLevel, NULL, 0, &dwSize);
     TOKEN_MANDATORY_LABEL *pTIL = (TOKEN_MANDATORY_LABEL*)malloc(dwSize);
     
